@@ -1,144 +1,210 @@
 #pragma once
-// ^ Igual que en registers.h: evita doble inclusión.
 
 #include "registers.h"
-// ^ Incluimos la definición de Registers, Flag, RegisterPair...
-//   La ruta es relativa al directorio "include" (que se pasa con -Iinclude).
-
 #include <cstdint>
 
 namespace z80 {
 
 // ---------------------------------------------------------------------------
 // IBus: interfaz abstracta del bus del sistema.
-//
-// El Z80 real no tiene memoria ni puertos propios: solo tiene un bus de
-// direcciones, un bus de datos y unas señales de control. Modelamos eso
-// con esta interfaz.
-//
-// Cualquier "máquina" (Amstrad CPC, Spectrum, un test...) implementará
-// IBus y decidirá qué devuelve cada dirección y cada puerto.
-//
-// Al ser una interfaz pura (todos los métodos virtuales puros), el CPU
-// no depende de ninguna implementación concreta.
+// (Sin cambios respecto a versiones anteriores)
 // ---------------------------------------------------------------------------
 class IBus {
 public:
     virtual ~IBus() = default;
 
-    // Memoria: dirección de 16 bits, dato de 8 bits.
     virtual std::uint8_t read (std::uint16_t addr) = 0;
     virtual void         write(std::uint16_t addr, std::uint8_t value) = 0;
 
-    // Puertos de E/S (instrucciones IN / OUT).
-    // En el Z80, el puerto se direcciona con 16 bits (A en el byte alto,
-    // el operando en el bajo), pero muchos periféricos solo miran los 8 bajos.
     virtual std::uint8_t in (std::uint16_t port) = 0;
     virtual void         out(std::uint16_t port, std::uint8_t value) = 0;
 };
 
 // ---------------------------------------------------------------------------
-// Z80: el procesador.
+// [8a] IndexMode: indica qué par de registros usar como "HL base".
 //
-// La clase contiene:
-//   - Una referencia al bus (IBus&), que le da acceso al exterior.
-//   - El bloque de registros (Registers).
-//   - Un contador acumulado de T-states (ciclos de reloj), útil para
-//     sincronizar con el resto del sistema (vídeo, sonido, etc.).
+// El Z80 tiene tres pares de 16 bits que se comportan de forma parecida:
+//   - HL  (siempre disponible)
+//   - IX  (solo cuando la instrucción viene precedida por el prefijo DD)
+//   - IY  (solo cuando la instrucción viene precedida por el prefijo FD)
+//
+// Muchas instrucciones se escriben una sola vez en el código, pero eligen
+// cuál de los tres pares usar según este "modo". Esto evita triplicar el
+// decodificador entero para las versiones con prefijo.
+//
+// De momento (Paso 8a) esta distinción no se usa todavía en el comportamiento
+// real: el step() público siempre pasa HL. Se usará a partir del Paso 8b.
+// ---------------------------------------------------------------------------
+enum class IndexMode {
+    HL,   // sin prefijo
+    IX,   // con prefijo DD
+    IY    // con prefijo FD
+};
+
+// ---------------------------------------------------------------------------
+// Z80: el procesador.
 // ---------------------------------------------------------------------------
 class Z80 {
 public:
-    // Construimos el CPU conectándolo a un bus concreto. El bus debe
-    // sobrevivir al Z80 (por eso guardamos una referencia, no una copia).
     explicit Z80(IBus& bus);
 
-    // Reinicio del CPU como si se acabara de encender (o se pulsara RESET).
     void reset();
 
-    // Ejecuta UNA instrucción completa.
-    // Devuelve el número de T-states consumidos por esa instrucción.
+    // Ejecuta UNA instrucción completa. Devuelve los T-states consumidos.
+    // Públicamente siempre arranca en modo HL; los prefijos DD/FD cambiarán
+    // el modo internamente en el Paso 8b.
     int step();
 
-    // Acceso a los registros (para depuración, tests, panel didáctico...).
+    // Acceso a los registros (para tu panel didáctico y para los tests).
     Registers&       regs()       { return regs_; }
     const Registers& regs() const { return regs_; }
 
-    // Total de T-states acumulados desde el último reset.
+    // Total de T-states acumulados desde el reset.
     std::uint64_t cycles() const { return cycles_; }
 
 private:
     // --- Referencias y estado ---
-    IBus&          bus_;    // conexión con el exterior (memoria + E/S)
-    Registers      regs_;   // todos los registros del Z80
-    std::uint64_t  cycles_ = 0;  // contador acumulado de T-states
+    IBus&         bus_;
+    Registers     regs_;
+    std::uint64_t cycles_ = 0;
 
-    // --- Helpers internos del ciclo fetch/decode/execute ---
+    // =========================================================================
+    // Helpers de fetch
+    // =========================================================================
 
     // Lee el siguiente byte de memoria en PC y avanza PC.
     std::uint8_t  fetch_byte();
 
     // Lee dos bytes (little-endian) desde PC y avanza PC dos posiciones.
-    // El primer byte leído es el BAJO, el segundo el ALTO.
     std::uint16_t fetch_word();
 
-    // Lee el registro de 8 bits indicado por índice 0..7.
-    // El índice 6 significa "(HL)": acceso a memoria en la dirección HL.
-    std::uint8_t read_reg8(int idx);
+    // =========================================================================
+    // [8a] Helpers de selección de registros según IndexMode
+    //
+    // Estos son los que permiten que una misma instrucción trabaje con HL,
+    // IX o IY indistintamente. Todos son "puros": reciben el modo y hacen
+    // lo correcto.
+    // =========================================================================
 
-    // Escribe el registro de 8 bits indicado por índice 0..7.
-    // Igual que read_reg8: el índice 6 escribe en (HL).
-    void write_reg8(int idx, std::uint8_t value);
+    // Devuelve el valor del par base (HL, IX o IY) según el modo.
+    std::uint16_t get_hl (IndexMode m) const;
 
-    // --- Cálculo de flags ---
-    // Recalculan todos los flags según el resultado y los operandos.
-    void flags_add (std::uint8_t a, std::uint8_t b, std::uint8_t res, bool carry_in);
-    void flags_sub (std::uint8_t a, std::uint8_t b, std::uint8_t res, bool carry_in);
-    void flags_logical(std::uint8_t res);   // AND / OR / XOR
+    // Escribe el par base. Para HL usa set_hl del bloque de registros.
+    void          set_hl (IndexMode m, std::uint16_t v);
 
-    // Versiones para INC/DEC, que NO tocan el flag C.
-    void flags_inc (std::uint8_t before, std::uint8_t after);
-    void flags_dec (std::uint8_t before, std::uint8_t after);
+    // Devuelve el byte "alto" del par base: H, IXH o IYH.
+    std::uint8_t  get_h  (IndexMode m) const;
 
-    // Paridad par: ¿hay un número par de bits a 1?
-    static bool parity_even(std::uint8_t v);
+    // Devuelve el byte "bajo" del par base: L, IXL o IYL.
+    std::uint8_t  get_l  (IndexMode m) const;
 
-    // Lee un registro de 16 bits por índice.
-    // Convención Z80 para pares "principales" (grupo LD rr,nn, ADD HL,rr, PUSH/POP):
-    //   0=BC  1=DE  2=HL  3=SP
-    // Para PUSH/POP AF hay un índice aparte (4) porque A y F no forman
-    // un par "normal" en la codificación de LD rr,nn.
-    std::uint16_t read_reg16(int idx);
-    void          write_reg16(int idx, std::uint16_t value);
+    // Escribe el byte alto del par base.
+    void          set_h  (IndexMode m, std::uint8_t v);
 
-    // Pila (SP crece hacia abajo).
-    void push16(std::uint16_t value);
+    // Escribe el byte bajo del par base.
+    void          set_l  (IndexMode m, std::uint8_t v);
+
+    // Devuelve la dirección "efectiva" de (HL)/(IX+d)/(IY+d).
+    //
+    // El parámetro d es el desplazamiento CON SIGNO que aparece tras el
+    // opcode en las instrucciones con (IX+d) o (IY+d). Para HL se ignora
+    // (siempre 0).
+    //
+    // En el Paso 8a esta función todavía no se usa en instrucciones reales
+    // (porque aún no implementamos (IX+d)); se usará a partir del 8c.
+    std::uint16_t get_hl_addr(IndexMode m, std::int8_t d) const;
+
+    // =========================================================================
+    // Helpers de lectura/escritura de registros de 8 bits por índice (0..7)
+    //
+    // La codificación Z80 para registros de 8 bits es:
+    //   0=B  1=C  2=D  3=E  4=H  5=L  6=(HL)  7=A
+    //
+    // [8a] Ahora reciben un IndexMode.
+    //   - Para idx = 6 (el caso (HL)), en modo IX/IY se convierte en
+    //     (IX+d) o (IY+d). En el Paso 8a todavía lo tratamos como (HL)
+    //     también en modo IX/IY, porque aún no leemos el byte d. En el 8c
+    //     lo arreglaremos.
+    //   - Para idx = 4 (H) y 5 (L), en modo IX/IY se convierten en IXH/IXL
+    //     o IYH/IYL, respectivamente. En el 8a ya respetamos esto porque
+    //     es gratis (los helpers get_h/get_l ya existen).
+    // =========================================================================
+    std::uint8_t read_reg8 (IndexMode m, int idx);
+    void         write_reg8(IndexMode m, int idx, std::uint8_t value);
+
+    // =========================================================================
+    // Helpers de lectura/escritura de pares de 16 bits por índice
+    //
+    // Convención: 0=BC 1=DE 2=HL 3=SP
+    //
+    // [8a] Añadimos una variante "extendida" que interpreta el índice 2
+    //      (HL) como el par base del IndexMode. Los índices 0 (BC), 1 (DE)
+    //      y 3 (SP) no cambian nunca (en el Z80 real no existe IX/BC ni nada
+    //      por el estilo: solo HL se sustituye por IX/IY).
+    // =========================================================================
+    std::uint16_t read_reg16 (int idx);                                  // sin cambios
+    void          write_reg16(int idx, std::uint16_t value);             // sin cambios
+    std::uint16_t read_reg16_idx (IndexMode m, int idx);                 // [8a] nuevo
+    void          write_reg16_idx(IndexMode m, int idx, std::uint16_t v); // [8a] nuevo
+
+    // =========================================================================
+    // Pila
+    // =========================================================================
+    void          push16(std::uint16_t value);
     std::uint16_t pop16();
 
-    // Flags específicos de operaciones de 16 bits.
+    // =========================================================================
+    // Cálculo de flags
+    // =========================================================================
+    void flags_add (std::uint8_t a, std::uint8_t b, std::uint8_t res, bool carry_in);
+    void flags_sub (std::uint8_t a, std::uint8_t b, std::uint8_t res, bool carry_in);
+    void flags_logical(std::uint8_t res);
+    void flags_inc (std::uint8_t before, std::uint8_t after);
+    void flags_dec (std::uint8_t before, std::uint8_t after);
     void flags_add16(std::uint16_t a, std::uint16_t b, std::uint16_t res);
+    void flags_add16_carry(std::uint16_t a, std::uint16_t b,
+                           std::uint16_t res, bool carry_in);
+    void flags_sub16_carry(std::uint16_t a, std::uint16_t b,
+                           std::uint16_t res, bool carry_in);
 
-    // Comprueba condición "cc" (0..7) según la codificación Z80:
-    //   0=NZ 1=Z 2=NC 3=C 4=PO 5=PE 6=P 7=M
+    static bool parity_even(std::uint8_t v);
+
+    // Comprueba condición "cc" (0..7): 0=NZ 1=Z 2=NC 3=C 4=PO 5=PE 6=P 7=M
     bool condition(int cc) const;
 
-    // Ejecuta una instrucción CB (el opcode CB ya fue leído, aquí viene el segundo byte).
-    int  execute_cb();
+    // =========================================================================
+    // Prefijos
+    // =========================================================================
 
-    // Aplica una operación de rotación/shift al valor dado.
-    // op: 0=RLC 1=RRC 2=RL 3=RR 4=SLA 5=SRA 6=SLL 7=SRL
-    // Devuelve el resultado y actualiza los flags. El carry de entrada solo
-    // se usa en RL y RR (para el "a través del carry").
+    // [8a] Firma modificada: ahora recibe el IndexMode.
+    // En el Paso 8a el modo siempre es HL; a partir del 8b podrá ser IX/IY.
+    int execute_cb(IndexMode mode);
+
+    // [8a] Firma modificada: ahora recibe el IndexMode.
+    // Nota: en el Z80 real, el prefijo ED "ignora" a DD/FD (no existen
+    // instrucciones ED que se vean afectadas por DD/FD). Pero el prefijo DD
+    // SÍ se consume y el ED se ejecuta normalmente. Por eso el modo se pasa
+    // aunque en la práctica no se use dentro de execute_ed.
+    int execute_ed(IndexMode mode);
+
+    // =========================================================================
+    // Helpers del prefijo CB (rotaciones y BIT/RES/SET)
+    // =========================================================================
     std::uint8_t do_rotate(int op, std::uint8_t value);
+    void         do_bit   (int bit, std::uint8_t value);
 
-    // Aplica BIT b, value. Devuelve solo actualiza flags, no modifica value.
-    void do_bit(int bit, std::uint8_t value);
-
-    // Ejecuta una instrucción ED (el 0xED ya fue leído; aquí viene el segundo byte).
-    int execute_ed();
-
-    // Flags para ADC HL, rr / SBC HL, rr (16 bits, con carry).
-    void flags_add16_carry(std::uint16_t a, std::uint16_t b, std::uint16_t res, bool carry_in);
-    void flags_sub16_carry(std::uint16_t a, std::uint16_t b, std::uint16_t res, bool carry_in);
+    // =========================================================================
+    // [8a] Nuevo: ejecución interna con IndexMode
+    //
+    // step() público llama a esta función con IndexMode::HL tras leer el
+    // primer byte. Cuando en el 8b implementemos DD/FD, el step() público
+    // detectará el prefijo, leerá el siguiente byte y llamará a esta misma
+    // función con IndexMode::IX o IndexMode::IY.
+    //
+    // Contiene exactamente el mismo switch que antes tenía step(), pero
+    // usando los helpers get_hl/set_hl/read_reg8(m, ...) etc.
+    // =========================================================================
+    int execute_with_mode(IndexMode mode, std::uint8_t op);
 };
 
 } // namespace z80
