@@ -868,7 +868,12 @@ int Z80::execute_with_mode(IndexMode mode, std::uint8_t op) {
             std::swap(regs_.l, regs_.l_);
             break;
 
-        case 0xEB:          // EX DE, HL
+            case 0xEB:          // EX DE, HL
+            // NOTA IMPORTANTE: aunque venga con prefijo DD o FD, esta
+            // instrucción intercambia SIEMPRE DE con HL, nunca con IX/IY.
+            // Por eso usamos regs_.h / regs_.l directamente y NO
+            // get_h(mode) / get_l(mode). Es la única excepción real del Z80
+            // a la regla "DD/FD sustituyen HL por IX/IY".
             std::swap(regs_.d, regs_.h);
             std::swap(regs_.e, regs_.l);
             break;
@@ -1250,18 +1255,31 @@ int Z80::execute_with_mode(IndexMode mode, std::uint8_t op) {
 }
 
 // ===========================================================================
-// [8a] step(): punto de entrada público.
+// [8b] step(): punto de entrada público.
 //
-// En el 8a sigue exactamente el flujo anterior: lee un opcode y lo pasa a
-// execute_with_mode con IndexMode::HL. Los prefijos DD/FD NO se detectan
-// todavía (eso es el 8b). Si llega un 0xDD o 0xFD, se imprimirá el mensaje
-// de "Opcode no implementado" del default, porque no están en el switch.
+// Detecta prefijos DD/FD y delega al execute_with_mode con el modo correcto.
 //
-// En el 8b modificaremos esto para detectar el prefijo y cambiar el modo.
+// Reglas implementadas:
+//   - DD → IndexMode::IX,  FD → IndexMode::IY.
+//   - Si el opcode que sigue también es DD o FD, se descarta el prefijo
+//     anterior y se procesa el nuevo (el Z80 no tiene pila de prefijos,
+//     solo recuerda el último). Esto se implementa con un bucle while.
+//   - Los 4 T-states del prefijo se suman siempre, incluso si el opcode
+//     siguiente ignora el modo (como JP nn).
 // ===========================================================================
 int Z80::step() {
     std::uint8_t op = fetch_byte();
-    int tstates = execute_with_mode(IndexMode::HL, op);
+    IndexMode mode = IndexMode::HL;
+    int prefix_cycles = 0;
+
+    // Consumir todos los prefijos DD/FD consecutivos. El último gana.
+    while (op == 0xDD || op == 0xFD) {
+        mode = (op == 0xDD) ? IndexMode::IX : IndexMode::IY;
+        prefix_cycles += 4;
+        op = fetch_byte();
+    }
+
+    int tstates = prefix_cycles + execute_with_mode(mode, op);
     cycles_ += tstates;
     return tstates;
 }
