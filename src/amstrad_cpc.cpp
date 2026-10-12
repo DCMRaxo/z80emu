@@ -11,10 +11,7 @@ AmstradCPC::AmstradCPC() : cpu_(*this) {
     cpu_.regs().pc = 0x0000;
     cpu_.regs().sp = 0xC000;
 
-    // [Paso 2] Inicialización mínima de los chips a valores razonables.
-    // El CRTC arranca con todos sus registros a 0; el AY también.
-    // El PPI, sin embargo, arranca con sus puertos en modo "entrada" y
-    // los valores de entrada a 0xFF (líneas flotantes pull-up).
+    // PPI: puertos de entrada con líneas pull-up (0xFF).
     ppi_port_a_ = 0xFF;
     ppi_port_b_ = 0xFF;
     ppi_port_c_ = 0xFF;
@@ -62,18 +59,47 @@ void AmstradCPC::load_bytes(std::uint16_t addr,
     }
 }
 
-// ---------------------------------------------------------------------------
-// run
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// [Paso 3] tick: avanza el contador de T-states interno y dispara
+// VSYNC / interrupción si toca.
+// ===========================================================================
+void AmstradCPC::tick(int tstates) {
+    tstates_counter_ += static_cast<std::uint64_t>(tstates);
+
+    // Si estamos en medio del pulso de VSYNC, ver si hay que terminarlo.
+    if (vsync_active_) {
+        vsync_tstates_ += static_cast<std::uint64_t>(tstates);
+        if (vsync_tstates_ >= VSYNC_DURATION) {
+            vsync_active_ = false;
+            vsync_tstates_ = 0;
+        }
+    }
+
+    // ¿Ha terminado el cuadro? Entonces generamos VSYNC + interrupción.
+    if (tstates_counter_ >= TSTATES_PER_FRAME) {
+        tstates_counter_ -= TSTATES_PER_FRAME;
+        vsync_active_ = true;
+        vsync_tstates_ = 0;
+        interrupt_count_++;
+
+        // Avisar al Z80: interrupción enmascarable (INT), datos = 0xFF.
+        cpu_.interrupt(0x00);
+    }
+}
+
+// ===========================================================================
+// run: ejecuta N steps del Z80, avanzando el estado del CPC tras cada uno.
+// ===========================================================================
 std::uint64_t AmstradCPC::run(std::uint64_t n_steps) {
     for (std::uint64_t i = 0; i < n_steps; ++i) {
-        cpu_.step();
+        int tstates = cpu_.step();
+        tick(tstates);
     }
     return cpu_.cycles();
 }
 
 // ===========================================================================
-// IBus: memoria (sin cambios respecto al paso 1)
+// IBus: memoria
 // ===========================================================================
 std::uint8_t AmstradCPC::read(std::uint16_t addr) {
     if (addr < 0x4000) {
@@ -98,65 +124,36 @@ void AmstradCPC::write(std::uint16_t addr, std::uint8_t value) {
 }
 
 // ===========================================================================
-// [Paso 2] IBus: E/S
-//
-// Convención: miramos los 8 bits ALTOS del puerto (port & 0xFF00) para
-// decidir qué chip está siendo direccionado. Los bits bajos se ignoran
-// porque en el CPC los periféricos no los usan para distinguirse.
+// IBus: E/S
 // ===========================================================================
-
 std::uint8_t AmstradCPC::in(std::uint16_t port) {
     std::uint8_t hi = static_cast<std::uint8_t>(port >> 8);
 
     switch (hi) {
-        // CRTC (0xBCxx selección, 0xBDxx datos)
         case 0xBC:
-            // Puerto de selección: en el CPC, la lectura devuelve 0xFF
-            // (no es de lectura). Algunos periféricos lo usan, pero el
-            // CRTC no responde.
             return 0xFF;
-
         case 0xBD:
-            // Puerto de datos: devolvemos el registro seleccionado.
             return crtc_regs_[crtc_selected_reg_ & 0x1F];
-
-        // AY-3-8912 (0xF4xx datos, 0xF5xx selección)
         case 0xF4:
-            // Puerto de datos del AY: devolvemos el registro seleccionado.
             return ay_regs_[ay_selected_reg_ & 0x0F];
-
         case 0xF5:
-            // Puerto de selección: no es de lectura, devolvemos 0xFF.
             return 0xFF;
-
-        // PPI 8255 (0xF6xx puerto A, 0xF7xx puerto B, 0xF8xx puerto C, 0xF9xx control)
         case 0xF6:
-            // Puerto A: en el CPC se usa principalmente para el teclado
-            // (selección de línea) y lectura de datos de disco.
-            // Devolvemos el valor que hayamos guardado (por defecto 0xFF).
             return ppi_port_a_;
-
         case 0xF7:
-            // Puerto B: en el CPC se usa para el sonido, el cassette, etc.
-            // Devolvemos el valor guardado.
             return ppi_port_b_;
-
-        case 0xF8:
-            // Puerto C: aquí llegan las señales de VSYNC del CRTC, el bit
-            // de cassette, etc. Por ahora devolvemos el valor guardado.
-            // MÁS ADELANTE: este puerto cambiará dinámicamente según el
-            // estado del CRTC.
-            return ppi_port_c_;
-
+        case 0xF8: {
+            // [Paso 3] Puerto C del PPI: aquí llega el bit de VSYNC.
+            // El bit 0 refleja el estado de VSYNC (1 si está activo).
+            // Los demás bits los dejamos como estén configurados.
+            std::uint8_t val = ppi_port_c_ & 0xFE;
+            if (vsync_active_) val |= 0x01;
+            return val;
+        }
         case 0xF9:
-            // Puerto de control del PPI: no es de lectura, devolvemos 0xFF.
             return 0xFF;
-
-        // FDC (controlador de disco, 0xFFxx): no emulado todavía.
         case 0xFF:
             return 0xFF;
-
-        // Cualquier otro puerto: devolvemos 0xFF (bus flotante).
         default:
             return 0xFF;
     }
@@ -166,41 +163,21 @@ void AmstradCPC::out(std::uint16_t port, std::uint8_t value) {
     std::uint8_t hi = static_cast<std::uint8_t>(port >> 8);
 
     switch (hi) {
-        // Gate Array (0x7Fxx)
         case 0x7F:
-            // Guardamos el último valor escrito. En el CPC real, este valor
-            // selecciona qué hacer: cambiar un color, cambiar el modo de
-            // vídeo, mapear memoria, escribir al AY, etc.
-            // Lo dejamos guardado y lo usaremos cuando implementemos el GA.
             ga_last_value_ = value;
             break;
-
-        // CRTC (0xBCxx selección, 0xBDxx datos)
         case 0xBC:
-            // Escribir en el puerto de selección: guardamos el número de
-            // registro (solo se usan los 5 bits bajos).
             crtc_selected_reg_ = value & 0x1F;
             break;
-
         case 0xBD:
-            // Escribir en el puerto de datos: guardamos el valor en el
-            // registro seleccionado.
             crtc_regs_[crtc_selected_reg_ & 0x1F] = value;
             break;
-
-        // AY-3-8912 (0xF4xx datos, 0xF5xx selección)
         case 0xF4:
-            // Escribir en el puerto de datos del AY.
             ay_regs_[ay_selected_reg_ & 0x0F] = value;
             break;
-
         case 0xF5:
-            // Escribir en el puerto de selección: guardamos el número de
-            // registro del AY (solo se usan los 4 bits bajos).
             ay_selected_reg_ = value & 0x0F;
             break;
-
-        // PPI 8255 (0xF6xx-0xF9xx)
         case 0xF6:
             ppi_port_a_ = value;
             break;
@@ -213,8 +190,6 @@ void AmstradCPC::out(std::uint16_t port, std::uint8_t value) {
         case 0xF9:
             ppi_control_ = value;
             break;
-
-        // Otros puertos: ignoramos.
         default:
             break;
     }
