@@ -1,10 +1,20 @@
 #include "test_bus.h"
 
+// ===========================================================================
+// Test del Paso 8b: prefijos DD/FD SIN desplazamiento.
+//
+// Verifica que:
+//   - DD/FD se detectan y consumen correctamente.
+//   - Las instrucciones que usan HL como par funcionan con IX/IY.
+//   - Las instrucciones que usan H o L por separado funcionan con IXH/IXL.
+//   - PUSH/POP IX y JP (IX) funcionan.
+// ===========================================================================
+
 int main() {
     SimpleBus bus;
     z80::Z80 cpu(bus);
 
-    // Programa de prueba del Paso 8b: prefijos DD/FD sin desplazamiento.
+    // Programa:
     //
     //   0x0000: DD 21 34 12   LD IX, 0x1234
     //   0x0004: FD 21 78 56   LD IY, 0x5678
@@ -32,8 +42,6 @@ int main() {
     bus.ram[0xAABB] = 0x76;
 
     // Inicializamos SP, B y C a valores conocidos antes de arrancar.
-    // (Aún no hemos implementado un programa de inicialización, así que
-    //  los fijamos directamente en los registros.)
     cpu.regs().sp = 0xFF00;
     cpu.regs().b  = 0x01;
     cpu.regs().c  = 0x23;   // BC = 0x0123
@@ -49,9 +57,7 @@ int main() {
             i, r.pc, r.a, r.f, r.b, r.c, r.d, r.e, r.h, r.l,
             r.ix, r.iy, r.sp);
 
-        // Verificación de memoria tras PUSH IX (que ocurre en el step 5,
-        // contando desde 0: steps 0..5 son las 6 primeras instrucciones,
-        // y PUSH IX es la 6ª → índice 5).
+        // Verificación de memoria tras PUSH IX (step 5, contando desde 0).
         if (i == 5) {
             std::printf("        mem[FEFE]=%02X mem[FEFF]=%02X (esperado BB AA)\n",
                         bus.ram[0xFEFE], bus.ram[0xFEFF]);

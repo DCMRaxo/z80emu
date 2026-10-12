@@ -191,7 +191,7 @@ std::uint8_t Z80::read_reg8(IndexMode m, int idx) {
         case 3: return regs_.e;
         case 4: return get_h(m);                                     // [8a] H / IXH / IYH
         case 5: return get_l(m);                                     // [8a] L / IXL / IYL
-        case 6: return bus_.read(regs_.hl().word);                   // (HL) — en 8a sin d
+        case 6: return bus_.read(get_hl_addr(m, ea_offset_));        // [8c] (HL) — en 8a sin d
         case 7: return regs_.a;
     }
     return 0;
@@ -203,9 +203,9 @@ void Z80::write_reg8(IndexMode m, int idx, std::uint8_t value) {
         case 1: regs_.c = value; return;
         case 2: regs_.d = value; return;
         case 3: regs_.e = value; return;
-        case 4: set_h(m, value); return;                             // [8a] H / IXH / IYH
-        case 5: set_l(m, value); return;                             // [8a] L / IXL / IYL
-        case 6: bus_.write(regs_.hl().word, value); return;          // (HL) — en 8a sin d
+        case 4: set_h(m, value); return;                                // [8a] H / IXH / IYH
+        case 5: set_l(m, value); return;                                // [8a] L / IXL / IYL
+        case 6: bus_.write(get_hl_addr(m, ea_offset_), value); return;  // [8c] (HL) — en 8a sin d
         case 7: regs_.a = value; return;
     }
 }
@@ -839,8 +839,46 @@ int Z80::execute_ed(IndexMode /*mode*/) {
 //
 // Devuelve los T-states consumidos. La suma a cycles_ la hace el que llama.
 // ===========================================================================
+
+// ===========================================================================
+// [8c] opcode_uses_hl_indirect: ¿este opcode usa (HL)?
+//
+// Devuelve true si, tras aplicar un prefijo DD/FD, la instrucción debe leer
+// el byte d y por tanto opera sobre (IX+d) o (IY+d). Se usa al principio de
+// execute_with_mode para decidir si hay que hacer fetch de ese byte.
+// ===========================================================================
+bool Z80::opcode_uses_hl_indirect(std::uint8_t op) const {
+    // LD r, (HL)  y  LD (HL), r  —  0x40..0x7F con algún índice 6,
+    // excluyendo 0x76 (HALT).
+    if (op >= 0x40 && op <= 0x7F && op != 0x76) {
+        int dst = (op >> 3) & 0x07;
+        int src =  op       & 0x07;
+        if (dst == 6 || src == 6) return true;
+    }
+
+    // LD (HL), n  (0x36)
+    if (op == 0x36) return true;
+
+    // ALU con (HL): 0x80..0xBF con índice 6 en los bits bajos.
+    if (op >= 0x80 && op <= 0xBF && (op & 0x07) == 6) return true;
+
+    // INC (HL) y DEC (HL)
+    if (op == 0x34 || op == 0x35) return true;
+
+    return false;
+}
+
 int Z80::execute_with_mode(IndexMode mode, std::uint8_t op) {
     int tstates = 4;
+
+    // [8c] Si estamos en modo IX/IY y el opcode usa (HL), leemos el
+    // desplazamiento d justo después del opcode. Lo guardamos en
+    // ea_offset_ para que read_reg8/write_reg8 lo usen al vuelo.
+    // En modo HL siempre es 0 y da igual.
+    ea_offset_ = 0;
+    if (mode != IndexMode::HL && opcode_uses_hl_indirect(op)) {
+        ea_offset_ = static_cast<std::int8_t>(fetch_byte());
+    }
 
     switch (op) {
 
@@ -868,7 +906,7 @@ int Z80::execute_with_mode(IndexMode mode, std::uint8_t op) {
             std::swap(regs_.l, regs_.l_);
             break;
 
-            case 0xEB:          // EX DE, HL
+            case 0xEB:      // EX DE, HL
             // NOTA IMPORTANTE: aunque venga con prefijo DD o FD, esta
             // instrucción intercambia SIEMPRE DE con HL, nunca con IX/IY.
             // Por eso usamos regs_.h / regs_.l directamente y NO

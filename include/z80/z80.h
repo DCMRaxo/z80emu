@@ -205,6 +205,16 @@ private:
     // usando los helpers get_hl/set_hl/read_reg8(m, ...) etc.
     // =========================================================================
     int execute_with_mode(IndexMode mode, std::uint8_t op);
+
+    // [8c] Desplazamiento de la instrucción en curso (solo para IX/IY).
+    // Se lee UNA VEZ por instrucción, justo después del opcode, y los
+    // helpers read_reg8/write_reg8 lo usan para calcular (IX+d) o (IY+d).
+    // En modo HL no se usa (get_hl_addr ignora d).
+    std::int8_t ea_offset_ = 0;
+
+    // [8c] Devuelve true si el opcode usa (HL) y por tanto, en modo IX/IY,
+    // requiere leer el byte d justo después del opcode.
+    bool opcode_uses_hl_indirect(std::uint8_t op) const;
 };
 
 } // namespace z80
