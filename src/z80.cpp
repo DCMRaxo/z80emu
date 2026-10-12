@@ -1003,6 +1003,53 @@ int Z80::execute_with_mode(IndexMode mode, std::uint8_t op) {
             break;
         }
 
+        case 0x07: {  // RLCA: rota A a la izquierda circular, solo toca C.
+            std::uint8_t a = regs_.a;
+            bool c = (a & 0x80) != 0;
+            regs_.a = static_cast<std::uint8_t>((a << 1) | (c ? 1 : 0));
+            // Solo se modifica C, H=0, N=0. S, Z y P/V se preservan.
+            std::uint8_t f = regs_.f & (SF | ZF | PF);
+            if (c) f |= CF;
+            f |= regs_.a & (XF | YF);
+            regs_.f = f;
+            break;
+        }
+
+        case 0x0F: {  // RRCA: rota A a la derecha circular, solo toca C.
+            std::uint8_t a = regs_.a;
+            bool c = (a & 0x01) != 0;
+            regs_.a = static_cast<std::uint8_t>((a >> 1) | (c ? 0x80 : 0));
+            std::uint8_t f = regs_.f & (SF | ZF | PF);
+            if (c) f |= CF;
+            f |= regs_.a & (XF | YF);
+            regs_.f = f;
+            break;
+        }
+
+        case 0x17: {  // RLA: rota A a la izquierda a través del carry.
+            std::uint8_t a = regs_.a;
+            bool old_c = regs_.flag(CF);
+            bool new_c = (a & 0x80) != 0;
+            regs_.a = static_cast<std::uint8_t>((a << 1) | (old_c ? 1 : 0));
+            std::uint8_t f = regs_.f & (SF | ZF | PF);
+            if (new_c) f |= CF;
+            f |= regs_.a & (XF | YF);
+            regs_.f = f;
+            break;
+        }
+
+        case 0x1F: {  // RRA: rota A a la derecha a través del carry.
+            std::uint8_t a = regs_.a;
+            bool old_c = regs_.flag(CF);
+            bool new_c = (a & 0x01) != 0;
+            regs_.a = static_cast<std::uint8_t>((a >> 1) | (old_c ? 0x80 : 0));
+            std::uint8_t f = regs_.f & (SF | ZF | PF);
+            if (new_c) f |= CF;
+            f |= regs_.a & (XF | YF);
+            regs_.f = f;
+            break;
+        }
+
         case 0x27: {        // DAA
             std::uint8_t a = regs_.a;
             bool n = regs_.flag(NF);
@@ -1032,7 +1079,7 @@ int Z80::execute_with_mode(IndexMode mode, std::uint8_t op) {
             break;
         }
 
-                // =====================================================================
+        // =====================================================================
         // 16 bits sin modo especial (BC, DE, SP)
         // =====================================================================
 
@@ -1109,16 +1156,66 @@ int Z80::execute_with_mode(IndexMode mode, std::uint8_t op) {
             break;
         }
 
+        case 0xF9:  // LD SP, HL  →  con DD/FD: LD SP, IX / LD SP, IY
+            regs_.sp = get_hl(mode);
+            tstates = 6;
+            break;
+
         case 0x32: {  // LD (nn), A  (no usa HL; DD/FD no la afectan)
             std::uint16_t addr = fetch_word();
             bus_.write(addr, regs_.a);
             tstates = 13;
             break;
         }
+
+        case 0xD3: {  // OUT (n), A
+            std::uint8_t n = fetch_byte();
+            std::uint16_t port = static_cast<std::uint16_t>((regs_.a << 8) | n);
+            bus_.out(port, regs_.a);
+            tstates = 11;
+            break;
+        }
+
+        case 0xDB: {  // IN A, (n)
+            std::uint8_t n = fetch_byte();
+            std::uint16_t port = static_cast<std::uint16_t>((regs_.a << 8) | n);
+            regs_.a = bus_.in(port);
+            tstates = 11;
+            break;
+        }
+
         case 0x3A: {  // LD A, (nn)  (no usa HL)
             std::uint16_t addr = fetch_word();
             regs_.a = bus_.read(addr);
             tstates = 13;
+            break;
+        }
+
+        case 0x0A: {  // LD A, (BC)
+            std::uint16_t addr = regs_.bc().word;
+            regs_.a = bus_.read(addr);
+            tstates = 7;
+            break;
+        }
+
+        case 0x02: {  // LD (BC), A
+            std::uint16_t addr = regs_.bc().word;
+            bus_.write(addr, regs_.a);
+            tstates = 7;
+            break;
+        }
+
+        case 0x1A: {  // LD A, (DE)
+            std::uint16_t addr = regs_.de().word;
+            regs_.a = bus_.read(addr);
+            tstates = 7;
+            break;
+        }
+
+        case 0x12: {  // LD (DE), A
+            std::uint16_t addr = regs_.de().word;
+            bus_.write(addr, regs_.a);
+            tstates = 7;
             break;
         }
 
