@@ -502,8 +502,22 @@ void Z80::do_bit(int bit, std::uint8_t v) {
 // ---------------------------------------------------------------------------
 int Z80::execute_cb(IndexMode mode) {
     std::uint8_t op = fetch_byte();
+    return execute_cb_prefetched(mode, op);
+}
+
+// ===========================================================================
+// [8d] execute_cb_prefetched: implementación real de las instrucciones CB.
+//
+// Recibe el opcode ya leído (porque en el caso DD CB d op el byte d va
+// antes y tenemos que haberlo consumido para saber si el prefijo aplica).
+//
+// El modo indica qué par usar para (HL): HL, IX o IY.
+// El desplazamiento d ya está en ea_offset_ (lo pone el que llama).
+// ===========================================================================
+int Z80::execute_cb_prefetched(IndexMode mode, std::uint8_t op) {
     int reg = op & 0x07;
 
+    // Rotaciones/shifts: 0x00..0x3F
     if (op < 0x40) {
         int rot = (op >> 3) & 0x07;
         std::uint8_t v = read_reg8(mode, reg);
@@ -511,12 +525,16 @@ int Z80::execute_cb(IndexMode mode) {
         write_reg8(mode, reg, r);
         return (reg == 6) ? 15 : 8;
     }
+
+    // BIT b, r: 0x40..0x7F
     if (op < 0x80) {
         int bit = (op >> 3) & 0x07;
         std::uint8_t v = read_reg8(mode, reg);
         do_bit(bit, v);
         return (reg == 6) ? 12 : 8;
     }
+
+    // RES b, r: 0x80..0xBF
     if (op < 0xC0) {
         int bit = (op >> 3) & 0x07;
         std::uint8_t v = read_reg8(mode, reg);
@@ -524,6 +542,8 @@ int Z80::execute_cb(IndexMode mode) {
         write_reg8(mode, reg, v);
         return (reg == 6) ? 15 : 8;
     }
+
+    // SET b, r: 0xC0..0xFF
     int bit = (op >> 3) & 0x07;
     std::uint8_t v = read_reg8(mode, reg);
     v |= static_cast<std::uint8_t>(1 << bit);
@@ -1293,17 +1313,9 @@ int Z80::execute_with_mode(IndexMode mode, std::uint8_t op) {
 }
 
 // ===========================================================================
-// [8b] step(): punto de entrada público.
+// [8d] step(): punto de entrada público.
 //
-// Detecta prefijos DD/FD y delega al execute_with_mode con el modo correcto.
-//
-// Reglas implementadas:
-//   - DD → IndexMode::IX,  FD → IndexMode::IY.
-//   - Si el opcode que sigue también es DD o FD, se descarta el prefijo
-//     anterior y se procesa el nuevo (el Z80 no tiene pila de prefijos,
-//     solo recuerda el último). Esto se implementa con un bucle while.
-//   - Los 4 T-states del prefijo se suman siempre, incluso si el opcode
-//     siguiente ignora el modo (como JP nn).
+// Detecta prefijos DD/FD y DD CB d op.
 // ===========================================================================
 int Z80::step() {
     std::uint8_t op = fetch_byte();
@@ -1315,6 +1327,33 @@ int Z80::step() {
         mode = (op == 0xDD) ? IndexMode::IX : IndexMode::IY;
         prefix_cycles += 4;
         op = fetch_byte();
+    }
+
+    // [8d] Caso especial: DD CB d op / FD CB d op.
+    // El byte d va ANTES del opcode CB, y el prefijo se ignora si el
+    // opcode CB no usa (HL). El byte d SIEMPRE se consume.
+    if (op == 0xCB && mode != IndexMode::HL) {
+        std::int8_t d = static_cast<std::int8_t>(fetch_byte());
+        std::uint8_t cb_op = fetch_byte();
+
+        int tstates = prefix_cycles + 4;  // DD/FD (4) + CB (4)
+
+        // ¿El opcode CB usa (HL)? Si no, el prefijo DD/FD se ignora y se
+        // ejecuta como CB normal, pero ya hemos consumido d.
+        int reg = cb_op & 0x07;
+        IndexMode effective_mode = (reg == 6) ? mode : IndexMode::HL;
+
+        // Guardamos d en ea_offset_ para que read_reg8/write_reg8 lo usen.
+        ea_offset_ = (effective_mode == IndexMode::HL) ? 0 : d;
+
+        // Pasamos el opcode CB ya leído a execute_cb. Para ello haremos
+        // un pequeño cambio en execute_cb: ahora acepta el opcode ya leído.
+        // (ver más abajo)
+        tstates += execute_cb_prefetched(effective_mode, cb_op);
+
+        ea_offset_ = 0;  // limpiar
+        cycles_ += tstates;
+        return tstates;
     }
 
     int tstates = prefix_cycles + execute_with_mode(mode, op);

@@ -215,6 +215,11 @@ private:
     // [8c] Devuelve true si el opcode usa (HL) y por tanto, en modo IX/IY,
     // requiere leer el byte d justo después del opcode.
     bool opcode_uses_hl_indirect(std::uint8_t op) const;
+
+    // [8d] Variante de execute_cb que recibe el opcode ya leído.
+    // Se usa desde step() en el caso DD CB d op, donde el opcode del CB
+    // ya ha sido leído antes de saber si aplica el prefijo.
+    int execute_cb_prefetched(IndexMode mode, std::uint8_t op);
 };
 
 } // namespace z80
