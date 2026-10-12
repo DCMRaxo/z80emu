@@ -220,6 +220,13 @@ private:
     // Se usa desde step() en el caso DD CB d op, donde el opcode del CB
     // ya ha sido leído antes de saber si aplica el prefijo.
     int execute_cb_prefetched(IndexMode mode, std::uint8_t op);
+
+    // [9a] Lee un byte de opcode: incrementa R (solo los 7 bits bajos).
+    // El bit 7 del registro R se preserva.
+    std::uint8_t fetch_opcode();
+
+    // [9a] Incrementa el registro R (7 bits bajos; el bit 7 se preserva).
+    void refresh();
 };
 
 } // namespace z80

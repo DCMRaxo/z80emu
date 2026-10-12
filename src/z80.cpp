@@ -57,6 +57,23 @@ std::uint16_t Z80::fetch_word() {
     return static_cast<std::uint16_t>(lo | (hi << 8));
 }
 
+// ---------------------------------------------------------------------------
+// [9a] refresh: incrementa los 7 bits bajos del registro R.
+// El bit 7 se preserva (solo se modifica con LD R, A).
+// ---------------------------------------------------------------------------
+void Z80::refresh() {
+    regs_.r = static_cast<std::uint8_t>((regs_.r & 0x80) | ((regs_.r + 1) & 0x7F));
+}
+
+// ---------------------------------------------------------------------------
+// [9a] fetch_opcode: lee un byte como opcode (o prefijo) e incrementa R.
+// ---------------------------------------------------------------------------
+std::uint8_t Z80::fetch_opcode() {
+    std::uint8_t b = bus_.read(regs_.pc++);
+    refresh();
+    return b;
+}
+
 // ===========================================================================
 // [8a] Helpers de selección de registros según IndexMode
 //
@@ -501,7 +518,7 @@ void Z80::do_bit(int bit, std::uint8_t v) {
 // ya es consciente del modo.
 // ---------------------------------------------------------------------------
 int Z80::execute_cb(IndexMode mode) {
-    std::uint8_t op = fetch_byte();
+    std::uint8_t op = fetch_opcode();
     return execute_cb_prefetched(mode, op);
 }
 
@@ -565,7 +582,7 @@ int Z80::execute_cb_prefetched(IndexMode mode, std::uint8_t op) {
 // es coherente y para que el lector sepa que no se nos ha olvidado.
 // ---------------------------------------------------------------------------
 int Z80::execute_ed(IndexMode /*mode*/) {
-    std::uint8_t op = fetch_byte();
+    std::uint8_t op = fetch_opcode();
 
     // ---- ADC HL, rr ----
     if (op == 0x4A || op == 0x5A || op == 0x6A || op == 0x7A) {
@@ -910,6 +927,16 @@ int Z80::execute_with_mode(IndexMode mode, std::uint8_t op) {
 
         case 0x76:          // HALT
             regs_.halted = true;
+            break;
+
+        case 0xF3:  // DI — deshabilita interrupciones
+            regs_.iff1 = false;
+            regs_.iff2 = false;
+            break;
+
+        case 0xFB:  // EI — habilita interrupciones
+            regs_.iff1 = true;
+            regs_.iff2 = true;
             break;
 
         case 0x08:          // EX AF, AF'
@@ -1313,45 +1340,43 @@ int Z80::execute_with_mode(IndexMode mode, std::uint8_t op) {
 }
 
 // ===========================================================================
-// [8d] step(): punto de entrada público.
+// [9a] step(): punto de entrada público.
 //
-// Detecta prefijos DD/FD y DD CB d op.
+// Cambios respecto al 8d:
+//   - Si el CPU está halted, consume 4 T-states y sale sin ejecutar nada.
+//   - Usa fetch_opcode() en lugar de fetch_byte() para leer los opcodes y
+//     prefijos (así se incrementa R correctamente).
+//   - Los operandos (inmediatos, direcciones, desplazamientos) siguen
+//     leyéndose con fetch_byte().
 // ===========================================================================
 int Z80::step() {
-    std::uint8_t op = fetch_byte();
+    // Si está halted: consume 4 T-states y sale. En el Z80 real esto
+    // equivale a ejecutar NOPs internos mientras espera una interrupción.
+    if (regs_.halted) {
+        refresh();
+        cycles_ += 4;
+        return 4;
+    }
+
+    std::uint8_t op = fetch_opcode();
     IndexMode mode = IndexMode::HL;
     int prefix_cycles = 0;
 
-    // Consumir todos los prefijos DD/FD consecutivos. El último gana.
     while (op == 0xDD || op == 0xFD) {
         mode = (op == 0xDD) ? IndexMode::IX : IndexMode::IY;
         prefix_cycles += 4;
-        op = fetch_byte();
+        op = fetch_opcode();
     }
 
-    // [8d] Caso especial: DD CB d op / FD CB d op.
-    // El byte d va ANTES del opcode CB, y el prefijo se ignora si el
-    // opcode CB no usa (HL). El byte d SIEMPRE se consume.
     if (op == 0xCB && mode != IndexMode::HL) {
         std::int8_t d = static_cast<std::int8_t>(fetch_byte());
-        std::uint8_t cb_op = fetch_byte();
-
-        int tstates = prefix_cycles + 4;  // DD/FD (4) + CB (4)
-
-        // ¿El opcode CB usa (HL)? Si no, el prefijo DD/FD se ignora y se
-        // ejecuta como CB normal, pero ya hemos consumido d.
+        std::uint8_t cb_op = fetch_opcode();
+        int tstates = prefix_cycles + 4;
         int reg = cb_op & 0x07;
         IndexMode effective_mode = (reg == 6) ? mode : IndexMode::HL;
-
-        // Guardamos d en ea_offset_ para que read_reg8/write_reg8 lo usen.
         ea_offset_ = (effective_mode == IndexMode::HL) ? 0 : d;
-
-        // Pasamos el opcode CB ya leído a execute_cb. Para ello haremos
-        // un pequeño cambio en execute_cb: ahora acepta el opcode ya leído.
-        // (ver más abajo)
         tstates += execute_cb_prefetched(effective_mode, cb_op);
-
-        ea_offset_ = 0;  // limpiar
+        ea_offset_ = 0;
         cycles_ += tstates;
         return tstates;
     }
