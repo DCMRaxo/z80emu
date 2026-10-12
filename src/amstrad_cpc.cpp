@@ -137,7 +137,10 @@ std::uint8_t AmstradCPC::in(std::uint16_t port) {
         case 0xF4:
             return ay_regs_[ay_selected_reg_ & 0x0F];
         case 0xF5:
-            return 0xFF;
+            // Puerto de selección del AY: en un CPC real, al leer, devuelve
+            // el valor del registro seleccionado (no es un puerto de solo
+            // escritura).
+            return ay_regs_[ay_selected_reg_ & 0x0F];
         case 0xF6:
             return ppi_port_a_;
         case 0xF7:
