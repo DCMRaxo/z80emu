@@ -62,6 +62,16 @@ public:
     // Total de T-states acumulados desde el reset.
     std::uint64_t cycles() const { return cycles_; }
 
+    // [9b] Genera una interrupción no enmascarable (NMI). Siempre se atiende.
+    void non_maskable_interrupt();
+
+    // [9b] Genera una interrupción enmascarable (INT). El parámetro "data"
+    // es el byte que el dispositivo pone en el bus de datos:
+    //   - En IM 0, es el opcode que se ejecutará.
+    //   - En IM 1, se ignora.
+    //   - En IM 2, es el byte bajo del vector.
+    void interrupt(std::uint8_t data);
+
 private:
     // --- Referencias y estado ---
     IBus&         bus_;
@@ -227,6 +237,12 @@ private:
 
     // [9a] Incrementa el registro R (7 bits bajos; el bit 7 se preserva).
     void refresh();
+
+    // [9b] Flag interno para el retraso de EI. En el Z80 real, EI no habilita
+    // las interrupciones inmediatamente, sino después de la instrucción
+    // siguiente. Este flag marca que hay que habilitarlas al final del
+    // próximo step().
+    bool ei_pending_ = false;
 };
 
 } // namespace z80

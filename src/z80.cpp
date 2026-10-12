@@ -932,11 +932,13 @@ int Z80::execute_with_mode(IndexMode mode, std::uint8_t op) {
         case 0xF3:  // DI — deshabilita interrupciones
             regs_.iff1 = false;
             regs_.iff2 = false;
+            ei_pending_ = false;   // [9b] cancelar cualquier EI pendiente
             break;
 
         case 0xFB:  // EI — habilita interrupciones
-            regs_.iff1 = true;
-            regs_.iff2 = true;
+            //regs_.iff1 = true;
+            //regs_.iff2 = true;
+            ei_pending_ = true;    // [9b] se aplicará al final del próximo step()
             break;
 
         case 0x08:          // EX AF, AF'
@@ -1339,6 +1341,94 @@ int Z80::execute_with_mode(IndexMode mode, std::uint8_t op) {
     return tstates;
 }
 
+// ---------------------------------------------------------------------------
+// [9b] non_maskable_interrupt: atiende una NMI.
+//
+// Comportamiento:
+//   - Apila el PC actual.
+//   - Guarda IFF1 en IFF2, y limpia IFF1 (deshabilita interrupciones).
+//   - Salta a 0x0066.
+//   - Sale del estado HALT si estaba halted.
+//   - Consume 11 T-states.
+// ---------------------------------------------------------------------------
+void Z80::non_maskable_interrupt() {
+    // Salir de HALT si procede.
+    regs_.halted = false;
+
+    // Guardar IFF1 en IFF2 y limpiar IFF1.
+    regs_.iff2 = regs_.iff1;
+    regs_.iff1 = false;
+
+    // Apilar el PC actual.
+    push16(regs_.pc);
+
+    // Saltar al vector de NMI.
+    regs_.pc = 0x0066;
+
+    cycles_ += 11;
+}
+
+// ---------------------------------------------------------------------------
+// [9b] interrupt: atiende una INT enmascarable.
+//
+// Comportamiento:
+//   - Si IFF1 == false, la interrupción no se atiende (el CPU sigue igual).
+//   - Si IFF1 == true:
+//       - Sale de HALT si estaba halted.
+//       - Limpia IFF1 e IFF2 (deshabilita interrupciones futuras).
+//       - Apila el PC actual.
+//       - Según IM:
+//           IM 0: ejecuta el opcode que viene en "data".
+//           IM 1: salta a 0x0038.
+//           IM 2: lee el vector (I << 8 | data), lee la dirección del
+//                 handler desde ahí y salta.
+//       - Consume 13 T-states.
+// ---------------------------------------------------------------------------
+void Z80::interrupt(std::uint8_t data) {
+    // Si las interrupciones están deshabilitadas, no se atiende.
+    if (!regs_.iff1) {
+        return;
+    }
+
+    // Salir de HALT.
+    regs_.halted = false;
+
+    // Limpiar IFF1 e IFF2 (deshabilita interrupciones).
+    regs_.iff1 = false;
+    regs_.iff2 = false;
+
+    // Apilar el PC.
+    push16(regs_.pc);
+
+    switch (regs_.im) {
+        case 0: {
+            // IM 0: el dispositivo nos da un opcode.
+            // Lo ejecutamos como si fuera una instrucción normal, pero
+            // sin incrementar PC antes (el PC que hemos apilado es el
+            // actual, y el opcode se ejecutará "sobre" ese PC).
+            // La forma más limpia: pasarlo a execute_with_mode, pero
+            // como el opcode puede ser un RST n, funciona bien.
+            execute_with_mode(IndexMode::HL, data);
+            break;
+        }
+        case 1: {
+            // IM 1: salto fijo a 0x0038.
+            regs_.pc = 0x0038;
+            break;
+        }
+        case 2: {
+            // IM 2: vector = (I << 8) | data.
+            std::uint16_t vector_addr = static_cast<std::uint16_t>((regs_.i << 8) | data);
+            std::uint8_t lo = bus_.read(vector_addr);
+            std::uint8_t hi = bus_.read(static_cast<std::uint16_t>(vector_addr + 1));
+            regs_.pc = static_cast<std::uint16_t>(lo | (hi << 8));
+            break;
+        }
+    }
+
+    cycles_ += 13;
+}
+
 // ===========================================================================
 // [9a] step(): punto de entrada público.
 //
@@ -1350,8 +1440,16 @@ int Z80::execute_with_mode(IndexMode mode, std::uint8_t op) {
 //     leyéndose con fetch_byte().
 // ===========================================================================
 int Z80::step() {
-    // Si está halted: consume 4 T-states y sale. En el Z80 real esto
-    // equivale a ejecutar NOPs internos mientras espera una interrupción.
+
+    // [9b] Aplicar EI pendiente: si el step anterior fue EI, ahora se
+    // habilitan las interrupciones (una instrucción después).
+    if (ei_pending_) {
+        regs_.iff1 = true;
+        regs_.iff2 = true;
+        ei_pending_ = false;
+    }
+
+    // Si está halted: consume 4 T-states y sale.
     if (regs_.halted) {
         refresh();
         cycles_ += 4;
@@ -1368,22 +1466,22 @@ int Z80::step() {
         op = fetch_opcode();
     }
 
+    int tstates;
+
     if (op == 0xCB && mode != IndexMode::HL) {
         std::int8_t d = static_cast<std::int8_t>(fetch_byte());
         std::uint8_t cb_op = fetch_opcode();
-        int tstates = prefix_cycles + 4;
+        tstates = prefix_cycles + 4;
         int reg = cb_op & 0x07;
         IndexMode effective_mode = (reg == 6) ? mode : IndexMode::HL;
         ea_offset_ = (effective_mode == IndexMode::HL) ? 0 : d;
         tstates += execute_cb_prefetched(effective_mode, cb_op);
         ea_offset_ = 0;
-        cycles_ += tstates;
-        return tstates;
+    } else {
+        tstates = prefix_cycles + execute_with_mode(mode, op);
     }
 
-    int tstates = prefix_cycles + execute_with_mode(mode, op);
     cycles_ += tstates;
     return tstates;
 }
-
 } // namespace z80
