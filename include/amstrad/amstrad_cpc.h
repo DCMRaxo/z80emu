@@ -100,6 +100,11 @@ private:
     // Estado actual de la señal VSYNC.
     bool vsync_active_ = false;
 
+    // Bit 5 del puerto C del PPI: pulso de interrupción del CRTC.
+    // Se pone a 1 durante unos ciclos tras una interrupción.
+    bool int_pulse_active_ = false;
+    std::uint64_t int_pulse_tstates_ = 0;
+
     // Contador de T-states desde el inicio del pulso de VSYNC.
     std::uint64_t vsync_tstates_ = 0;
 

@@ -1490,9 +1490,14 @@ void Z80::interrupt(std::uint8_t data) {
     // Salir de HALT.
     regs_.halted = false;
 
-    // Limpiar IFF1 e IFF2 (deshabilita interrupciones).
+    // Limpiar solo IFF1 (deshabilita interrupciones).
+    // IFF2 NO se toca: guarda el estado previo para que RETI/RETN
+    // puedan restaurar IFF1 desde IFF2.
     regs_.iff1 = false;
-    regs_.iff2 = false;
+
+    // Cancelar cualquier EI pendiente: si había un EI en curso, al
+    // atender la interrupción ese EI se descarta.
+    ei_pending_ = false;
 
     // Apilar el PC.
     push16(regs_.pc);
@@ -1538,14 +1543,6 @@ void Z80::interrupt(std::uint8_t data) {
 // ===========================================================================
 int Z80::step() {
 
-    // [9b] Aplicar EI pendiente: si el step anterior fue EI, ahora se
-    // habilitan las interrupciones (una instrucción después).
-    if (ei_pending_) {
-        regs_.iff1 = true;
-        regs_.iff2 = true;
-        ei_pending_ = false;
-    }
-
     // Si está halted: consume 4 T-states y sale.
     if (regs_.halted) {
         refresh();
@@ -1579,6 +1576,15 @@ int Z80::step() {
     }
 
     cycles_ += tstates;
+
+    // [9b] Aplicar EI pendiente: si el step anterior fue EI, ahora se
+    // habilitan las interrupciones (una instrucción después).
+    if (ei_pending_) {
+        regs_.iff1 = true;
+        regs_.iff2 = true;
+        ei_pending_ = false;
+    }
+
     return tstates;
 }
 } // namespace z80

@@ -83,7 +83,22 @@ void AmstradCPC::tick(int tstates) {
         interrupt_count_++;
 
         // Avisar al Z80: interrupción enmascarable (INT), datos = 0xFF.
-        cpu_.interrupt(0x00);
+        cpu_.interrupt(0xFF);
+
+        // [Paso 3] Activar el pulso de interrupción del CRTC: el bit 5
+        // del puerto C del PPI se pone a 1 durante unos ciclos.
+        int_pulse_active_ = true;
+        int_pulse_tstates_ = 0;
+    }
+
+    // Si estamos en el pulso de interrupción, contabilizar y desactivar
+    // cuando pase el tiempo (aproximadamente 1000 T-states).
+    if (int_pulse_active_) {
+        int_pulse_tstates_ += static_cast<std::uint64_t>(tstates);
+        if (int_pulse_tstates_ >= 1000) {
+            int_pulse_active_ = false;
+            int_pulse_tstates_ = 0;
+        }
     }
 }
 
@@ -143,14 +158,34 @@ std::uint8_t AmstradCPC::in(std::uint16_t port) {
             return ay_regs_[ay_selected_reg_ & 0x0F];
         case 0xF6:
             return ppi_port_a_;
-        case 0xF7:
-            return ppi_port_b_;
+        case 0xF7: {
+            // Puerto B del PPI: contiene el bit de VSYNC (según la fuente,
+            // puede estar en el bit 0 o en el bit 5). Vamos a reflejar
+            // VSYNC en el bit 0 y en el bit 5 para probar.
+            std::uint8_t val = ppi_port_b_ & 0xDE;  // limpia bits 0 y 5
+            if (vsync_active_) {
+                val |= 0x01;   // VSYNC en bit 0
+                val |= 0x20;   // VSYNC en bit 5
+            }
+            return val;
+        }
+            
         case 0xF8: {
-            // [Paso 3] Puerto C del PPI: aquí llega el bit de VSYNC.
-            // El bit 0 refleja el estado de VSYNC (1 si está activo).
-            // Los demás bits los dejamos como estén configurados.
-            std::uint8_t val = ppi_port_c_ & 0xFE;
+            // Puerto C del PPI: contiene el estado de VSYNC (bit 0),
+            // el estado de la interrupción del CRTC (bit 5), y otros bits.
+            //
+            // Bit 0: VSYNC. Se pone a 1 cuando el haz está en la zona
+            // de blanking vertical.
+            // Bit 5: interrupción del CRTC. Se pone a 1 cuando el CRTC
+            // ha generado una interrupción de 50 Hz, y el firmware lo
+            // lee para saber que la interrupción es del CRTC.
+            //
+            // En un CPC real, el bit 5 se pone a 1 durante el pulso de
+            // interrupción y se limpia después. Aquí lo ponemos a 1
+            // durante unos cuantos ciclos tras cada interrupción.
+            std::uint8_t val = ppi_port_c_ & 0xDC;  // limpia bits 0 y 5
             if (vsync_active_) val |= 0x01;
+            if (int_pulse_active_) val |= 0x20;
             return val;
         }
         case 0xF9:
