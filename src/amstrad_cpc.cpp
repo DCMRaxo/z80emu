@@ -11,6 +11,9 @@ AmstradCPC::AmstradCPC() : cpu_(*this) {
     cpu_.regs().pc = 0x0000;
     cpu_.regs().sp = 0xC000;
 
+    // CRTC: estado inicial a cero (todos los registros a 0).
+    crtc_.reset();
+
     // PPI: puertos de entrada con líneas pull-up (0xFF).
     ppi_port_a_ = 0xFF;
     ppi_port_b_ = 0xFF;
@@ -18,7 +21,7 @@ AmstradCPC::AmstradCPC() : cpu_(*this) {
 }
 
 // ---------------------------------------------------------------------------
-// load_roms
+// load_roms: carga las dos ROMs desde fichero (16 KB cada una).
 // ---------------------------------------------------------------------------
 bool AmstradCPC::load_roms(const std::string& lower_path,
                            const std::string& upper_path) {
@@ -43,7 +46,7 @@ bool AmstradCPC::load_roms(const std::string& lower_path,
 }
 
 // ---------------------------------------------------------------------------
-// load_bytes
+// load_bytes: copia bytes a memoria a partir de una dirección.
 // ---------------------------------------------------------------------------
 void AmstradCPC::load_bytes(std::uint16_t addr,
                             const std::uint8_t* data, std::size_t len) {
@@ -60,42 +63,38 @@ void AmstradCPC::load_bytes(std::uint16_t addr,
 }
 
 // ===========================================================================
-// [Paso 3] tick: avanza el contador de T-states interno y dispara
-// VSYNC / interrupción si toca.
+// tick: avanza el estado del CPC tras un step del Z80.
+//
+// Orden:
+//   1. Avanzar el CRTC con los T-states del Z80.
+//   2. Comprobar si el CRTC ha terminado un frame nuevo. Si sí, generar
+//      interrupción al Z80 y activar el pulso de interrupción del PPI.
+//   3. Actualizar el pulso de interrupción (apagarlo cuando expire).
 // ===========================================================================
 void AmstradCPC::tick(int tstates) {
-    tstates_counter_ += static_cast<std::uint64_t>(tstates);
+    // 1. Avanzar el CRTC.
+    crtc_.tick(tstates);
 
-    // Si estamos en medio del pulso de VSYNC, ver si hay que terminarlo.
-    if (vsync_active_) {
-        vsync_tstates_ += static_cast<std::uint64_t>(tstates);
-        if (vsync_tstates_ >= VSYNC_DURATION) {
-            vsync_active_ = false;
-            vsync_tstates_ = 0;
-        }
-    }
+    // 2. ¿Ha terminado un frame nuevo? El CRTC incrementa frame_count()
+    //    al cerrar cada frame. Comparamos con el último frame que
+    //    procesamos.
+    if (crtc_.frame_count() != last_frame_) {
+        last_frame_ = crtc_.frame_count();
 
-    // ¿Ha terminado el cuadro? Entonces generamos VSYNC + interrupción.
-    if (tstates_counter_ >= TSTATES_PER_FRAME) {
-        tstates_counter_ -= TSTATES_PER_FRAME;
-        vsync_active_ = true;
-        vsync_tstates_ = 0;
+        // Generar la interrupción al Z80 (INT enmascarable).
         interrupt_count_++;
-
-        // Avisar al Z80: interrupción enmascarable (INT), datos = 0xFF.
         cpu_.interrupt(0xFF);
 
-        // [Paso 3] Activar el pulso de interrupción del CRTC: el bit 5
-        // del puerto C del PPI se pone a 1 durante unos ciclos.
+        // Activar el pulso de interrupción: el bit 5 del puerto C del
+        // PPI se pone a 1 durante unos ciclos.
         int_pulse_active_ = true;
         int_pulse_tstates_ = 0;
     }
 
-    // Si estamos en el pulso de interrupción, contabilizar y desactivar
-    // cuando pase el tiempo (aproximadamente 1000 T-states).
+    // 3. Actualizar el pulso de interrupción: apagarlo cuando expire.
     if (int_pulse_active_) {
         int_pulse_tstates_ += static_cast<std::uint64_t>(tstates);
-        if (int_pulse_tstates_ >= 1000) {
+        if (int_pulse_tstates_ >= INT_PULSE_DURATION) {
             int_pulse_active_ = false;
             int_pulse_tstates_ = 0;
         }
@@ -145,53 +144,54 @@ std::uint8_t AmstradCPC::in(std::uint16_t port) {
     std::uint8_t hi = static_cast<std::uint8_t>(port >> 8);
 
     switch (hi) {
+        // CRTC: puerto de selección (no responde a lecturas).
         case 0xBC:
             return 0xFF;
+
+        // CRTC: puerto de datos. Devuelve el registro seleccionado.
         case 0xBD:
-            return crtc_regs_[crtc_selected_reg_ & 0x1F];
+            return crtc_.read_data();
+
+        // AY-3-8912: puerto de datos.
         case 0xF4:
             return ay_regs_[ay_selected_reg_ & 0x0F];
+
+        // AY-3-8912: puerto de selección (en el CPC responde devolviendo
+        // el registro seleccionado).
         case 0xF5:
-            // Puerto de selección del AY: en un CPC real, al leer, devuelve
-            // el valor del registro seleccionado (no es un puerto de solo
-            // escritura).
             return ay_regs_[ay_selected_reg_ & 0x0F];
+
+        // PPI 8255: puerto A.
         case 0xF6:
             return ppi_port_a_;
+
+        // PPI 8255: puerto B. Refleja VSYNC en los bits 0 y 5.
         case 0xF7: {
-            // Puerto B del PPI: contiene el bit de VSYNC (según la fuente,
-            // puede estar en el bit 0 o en el bit 5). Vamos a reflejar
-            // VSYNC en el bit 0 y en el bit 5 para probar.
-            std::uint8_t val = ppi_port_b_ & 0xDE;  // limpia bits 0 y 5
-            if (vsync_active_) {
-                val |= 0x01;   // VSYNC en bit 0
-                val |= 0x20;   // VSYNC en bit 5
+            std::uint8_t val = ppi_port_b_ & 0xDE;   // limpia bits 0 y 5
+            if (crtc_.vsync_active()) {
+                val |= 0x01;
+                val |= 0x20;
             }
             return val;
         }
-            
+
+        // PPI 8255: puerto C. Bit 0 = VSYNC, bit 5 = pulso de interrupción.
         case 0xF8: {
-            // Puerto C del PPI: contiene el estado de VSYNC (bit 0),
-            // el estado de la interrupción del CRTC (bit 5), y otros bits.
-            //
-            // Bit 0: VSYNC. Se pone a 1 cuando el haz está en la zona
-            // de blanking vertical.
-            // Bit 5: interrupción del CRTC. Se pone a 1 cuando el CRTC
-            // ha generado una interrupción de 50 Hz, y el firmware lo
-            // lee para saber que la interrupción es del CRTC.
-            //
-            // En un CPC real, el bit 5 se pone a 1 durante el pulso de
-            // interrupción y se limpia después. Aquí lo ponemos a 1
-            // durante unos cuantos ciclos tras cada interrupción.
-            std::uint8_t val = ppi_port_c_ & 0xDC;  // limpia bits 0 y 5
-            if (vsync_active_) val |= 0x01;
-            if (int_pulse_active_) val |= 0x20;
+            std::uint8_t val = ppi_port_c_ & 0xDC;   // limpia bits 0 y 5
+            if (crtc_.vsync_active()) val |= 0x01;
+            if (int_pulse_active_)    val |= 0x20;
             return val;
         }
+
+        // PPI 8255: puerto de control (no responde a lecturas).
         case 0xF9:
             return 0xFF;
+
+        // FDC (controlador de disco): no emulado.
         case 0xFF:
             return 0xFF;
+
+        // Cualquier otro puerto: devolvemos 0xFF (bus flotante).
         default:
             return 0xFF;
     }
@@ -201,33 +201,51 @@ void AmstradCPC::out(std::uint16_t port, std::uint8_t value) {
     std::uint8_t hi = static_cast<std::uint8_t>(port >> 8);
 
     switch (hi) {
+        // Gate Array: guardamos el último valor escrito.
         case 0x7F:
             ga_last_value_ = value;
             break;
+
+        // CRTC: puerto de selección.
         case 0xBC:
-            crtc_selected_reg_ = value & 0x1F;
+            crtc_.select_register(value);
             break;
+
+        // CRTC: puerto de datos.
         case 0xBD:
-            crtc_regs_[crtc_selected_reg_ & 0x1F] = value;
+            crtc_.write_data(value);
             break;
+
+        // AY-3-8912: puerto de datos.
         case 0xF4:
             ay_regs_[ay_selected_reg_ & 0x0F] = value;
             break;
+
+        // AY-3-8912: puerto de selección.
         case 0xF5:
             ay_selected_reg_ = value & 0x0F;
             break;
+
+        // PPI 8255: puerto A.
         case 0xF6:
             ppi_port_a_ = value;
             break;
+
+        // PPI 8255: puerto B.
         case 0xF7:
             ppi_port_b_ = value;
             break;
+
+        // PPI 8255: puerto C.
         case 0xF8:
             ppi_port_c_ = value;
             break;
+
+        // PPI 8255: puerto de control.
         case 0xF9:
             ppi_control_ = value;
             break;
+
         default:
             break;
     }

@@ -45,9 +45,9 @@ int main(int argc, char** argv) {
 
     // Volcado de los colores (Gate Array) y del CRTC.
     std::printf("Último valor del Gate Array: 0x%02X\n", cpc.ga_last_value());
-    std::printf("Último registro CRTC seleccionado: %d\n", cpc.crtc_selected_reg());
+    std::printf("Último registro CRTC seleccionado: %d\n", cpc.crtc().selected_register());
     for (int i = 0; i < 16; ++i) {
-        std::printf("  CRTC R%d = 0x%02X\n", i, cpc.crtc_reg(i));
+        std::printf("  CRTC R%d = 0x%02X\n", i, cpc.crtc().reg(i));
     }
 
     return 0;
